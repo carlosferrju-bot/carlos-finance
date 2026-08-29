@@ -1,0 +1,93 @@
+name: Import current CARLOS FINANCE
+
+on:
+  push:
+    branches:
+      - import-finance
+
+permissions:
+  contents: write
+
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v6
+
+      - name: Download current production app
+        run: |
+          set -e
+          curl -fsSL https://finance-silk-iota.vercel.app/ -o index.html
+          curl -fsSL https://finance-silk-iota.vercel.app/manifest.json -o manifest.json || true
+          curl -fsSL https://finance-silk-iota.vercel.app/service-worker.js -o service-worker.js || true
+
+      - name: Patch category registration
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('index.html')
+          s = p.read_text(encoding='utf-8')
+
+          old = '''$("catForm").onsubmit=e=>{e.preventDefault();db.categories.push({id:uid(),name:$("catName").value.trim(),type:$("catType").value});e.target.reset();persist("Categoria criada.")}'''
+          new = '''$("catForm").onsubmit=e=>{
+            e.preventDefault();
+            const name=$("catName").value.trim();
+            const type=$("catType").value;
+            if(!name){toast("Informe o nome da categoria.");return}
+            if(!Array.isArray(db.categories))db.categories=[];
+            const exists=db.categories.some(c=>String(c.name||"").trim().toLocaleLowerCase("pt-BR")===name.toLocaleLowerCase("pt-BR")&&c.type===type);
+            if(exists){toast("Essa categoria já existe para esse tipo.");return}
+            db.categories.push({id:uid(),name,type});
+            e.target.reset();
+            persist("Categoria criada com sucesso.");
+          }'''
+          if old not in s:
+              raise SystemExit('Cadastro de categoria: trecho original não encontrado')
+          s = s.replace(old, new, 1)
+
+          marker = 'function fillSelects(){'
+          if 'function renderCategories(){' not in s:
+              render_categories = '''function renderCategories(){
+            const el=$("catList");
+            if(!el)return;
+            const cats=Array.isArray(db.categories)?db.categories:[];
+            if(!cats.length){el.innerHTML='<div class="empty">Nenhuma categoria cadastrada.</div>';return}
+            const expense=cats.filter(c=>c.type==="expense");
+            const income=cats.filter(c=>c.type==="income");
+            const group=(title,items)=>`<div class="cat-group"><h3 style="margin:0 0 10px">${title}</h3>${items.length?items.map(c=>`<div class="item" style="display:flex;align-items:center;justify-content:space-between;gap:12px"><div><strong>${esc(c.name)}</strong><div class="muted">${c.type==="expense"?"Despesa":"Receita"}</div></div><button class="btn danger" type="button" onclick="delCat('${c.id}')">Excluir</button></div>`).join(""):'<div class="muted">Nenhuma.</div>'}</div>`;
+            el.innerHTML=group("Despesas",expense)+`<div style="height:16px"></div>`+group("Receitas",income);
+          }
+
+          '''
+              if marker not in s:
+                  raise SystemExit('Ponto de inserção de categorias não encontrado')
+              s = s.replace(marker, render_categories + marker, 1)
+
+          old_render = '''  fillSelects();
+  renderDashboard();'''
+          new_render = '''  fillSelects();
+  renderCategories();
+  renderDashboard();'''
+          if old_render not in s:
+              raise SystemExit('Função render: ponto de atualização não encontrado')
+          s = s.replace(old_render, new_render, 1)
+
+          p.write_text(s, encoding='utf-8')
+          PY
+
+      - name: Verify application
+        run: |
+          test -s index.html
+          grep -q 'function renderCategories' index.html
+          grep -q 'renderCategories();' index.html
+          grep -q 'Categoria criada com sucesso.' index.html
+
+      - name: Commit imported application
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add index.html manifest.json service-worker.js
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m 'Import CARLOS FINANCE and fix category registration'
+          git push
