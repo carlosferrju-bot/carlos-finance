@@ -1,0 +1,81 @@
+name: Fix category persistence
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Patch category handling
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('index.html')
+          s = p.read_text(encoding='utf-8')
+
+          old = '''function load(){
+  try{
+    const d=JSON.parse(localStorage.getItem(KEY))||empty();'''
+          new = '''function normalizeCategories(list){
+  const source=Array.isArray(list)?list:[];
+  const seen=new Set();
+  const result=[];
+  source.forEach(c=>{
+    if(!c || typeof c!=="object")return;
+    const name=String(c.name||"").trim();
+    const type=c.type==="income"?"income":"expense";
+    if(!name)return;
+    const key=name.toLocaleLowerCase("pt-BR")+"|"+type;
+    if(seen.has(key))return;
+    seen.add(key);
+    result.push({id:c.id||uid(),name,type});
+  });
+  return result;
+}
+
+function load(){
+  try{
+    const d=JSON.parse(localStorage.getItem(KEY))||empty();'''
+          if old not in s:
+              raise SystemExit('load marker not found')
+          s=s.replace(old,new,1)
+
+          old = '''    if(!Array.isArray(d.categories)) d.categories=empty().categories;
+    if(!d.goals||typeof d.goals!=="object") d.goals={saving:1000,variable:2000};'''
+          new = '''    if(!Array.isArray(d.categories)) d.categories=empty().categories;
+    d.categories=normalizeCategories(d.categories);
+    if(!d.goals||typeof d.goals!=="object") d.goals={saving:1000,variable:2000};'''
+          if old not in s:
+              raise SystemExit('category load marker not found')
+          s=s.replace(old,new,1)
+
+          old = '''  db.categories.push({id:uid(),name,type});
+  e.target.reset();
+  persist("Categoria criada com sucesso.");'''
+          new = '''  db.categories=normalizeCategories(db.categories);
+  db.categories.push({id:uid(),name,type});
+  db.categories=normalizeCategories(db.categories);
+  e.target.reset();
+  persist("Categoria criada com sucesso.");'''
+          if old not in s:
+              raise SystemExit('category submit marker not found')
+          s=s.replace(old,new,1)
+
+          p.write_text(s,encoding='utf-8')
+          PY
+
+      - name: Commit patched app
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add index.html
+          git diff --cached --quiet && exit 0
+          git commit -m "Fix category persistence and deduplicate categories"
+          git push
