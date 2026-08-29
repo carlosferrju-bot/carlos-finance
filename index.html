@@ -463,6 +463,31 @@ function load(){
 }
 function save(){localStorage.setItem(KEY,JSON.stringify(db));scheduleAutomaticBackup()}
 function uid(){return Date.now().toString(36)+Math.random().toString(36).slice(2,7)}
+
+function normalizeCategories(){
+  if(!Array.isArray(db.categories))db.categories=[];
+  const seen=new Map(), idMap=new Map(), clean=[];
+  for(const c of db.categories){
+    if(!c||typeof c!=="object")continue;
+    const name=String(c.name||"").trim();
+    if(!name)continue;
+    const type=c.type==="income"?"income":"expense";
+    const key=type+"|"+name.toLocaleLowerCase("pt-BR");
+    if(seen.has(key)){if(c.id)idMap.set(c.id,seen.get(key).id);continue}
+    const item={...c,id:c.id||uid(),name,type};
+    seen.set(key,item);
+    clean.push(item);
+  }
+  db.categories=clean;
+  for(const list of [db.transactions,db.fixed,db.bills]){
+    if(!Array.isArray(list))continue;
+    for(const item of list){
+      if(item&&item.category&&idMap.has(item.category))item.category=idMap.get(item.category);
+      if(item&&item.category) { const c=db.categories.find(x=>x.id===item.category); if(c&&"categoryName" in item)item.categoryName=c.name; }
+    }
+  }
+}
+
 function money(v){return Number(v||0).toLocaleString("pt-BR",{style:"currency",currency:"BRL"})}
 function dateBR(d){if(!d)return"—";let [y,m,x]=d.split("-");return `${x}/${m}/${y}`}
 function esc(v){return String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
@@ -1890,6 +1915,7 @@ function render(){
 
   // Nenhuma sincronização pode desfazer um pagamento já registrado.
   preservePaidBillStatuses(paidStatusSnapshot);
+  normalizeCategories();
 
   save();
 
@@ -2112,10 +2138,11 @@ $("catForm").onsubmit=e=>{
   const name=$("catName").value.trim();
   const type=$("catType").value;
   if(!name){toast("Informe o nome da categoria.");return}
-  if(!Array.isArray(db.categories))db.categories=[];
+  normalizeCategories();
   const exists=db.categories.some(c=>String(c.name||"").trim().toLocaleLowerCase("pt-BR")===name.toLocaleLowerCase("pt-BR")&&c.type===type);
   if(exists){toast("Essa categoria já existe para esse tipo.");return}
   db.categories.push({id:uid(),name,type});
+  normalizeCategories();
   e.target.reset();
   persist("Categoria criada com sucesso.");
 }
