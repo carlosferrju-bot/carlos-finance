@@ -2,8 +2,7 @@ name: Final fix for installment bill deletion
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -15,62 +14,181 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Patch installment deletion persistence
+      - name: Apply robust installment deletion repair
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
           python - <<'PY'
           from pathlib import Path
           p=Path('index.html')
           s=p.read_text(encoding='utf-8')
+          marker='/* INSTALLMENT_DELETE_REPAIR_V5 */'
+          if marker in s:
+              print('V5 already installed')
+              raise SystemExit(0)
 
-          # 1) Add a second, legacy-safe suppression list.
-          s=s.replace(
-            'deletedCardBills:[],deletedInstallmentBills:[],cardMonthManualValues:{}',
-            'deletedCardBills:[],deletedInstallmentBills:[],deletedBillSignatures:[],cardMonthManualValues:{}',
-            1
-          )
-          s=s.replace(
-            'if(!Array.isArray(d.deletedInstallmentBills)) d.deletedInstallmentBills=[];\n    if(!Array.isArray(d.cardAdjustments))',
-            'if(!Array.isArray(d.deletedInstallmentBills)) d.deletedInstallmentBills=[];\n    if(!Array.isArray(d.deletedBillSignatures)) d.deletedBillSignatures=[];\n    if(!Array.isArray(d.cardAdjustments))',
-            1
-          )
+          patch=r'''/* INSTALLMENT_DELETE_REPAIR_V5 */
+          (function(){
+            function v5Norm(v){
+              return String(v||"").normalize("NFKC").replace(/[–—−]/g,"-").replace(/\\s+/g," ").trim().toLocaleLowerCase("pt-BR");
+            }
 
-          # 2) Add a stable signature that survives regeneration with a new bill id.
-          marker='function syncInstallmentExpensesToBills(){'
-          helper='''function installmentBillSignature(desc,due,amount){\n  return "installment-signature|"+String(desc||"").trim()+"|"+String(due||"")+"|"+Number(amount||0).toFixed(2);\n}\n\nfunction billDeletionSignature(b){\n  if(!b)return "";\n  if(b.fromInstallmentId && Number(b.installmentNumber)>0){\n    return "installment-source|"+b.fromInstallmentId+"|"+Number(b.installmentNumber);\n  }\n  return installmentBillSignature(b.desc,b.due,b.amount);\n}\n\n'''
-          if marker not in s: raise SystemExit('sync marker not found')
-          if 'function installmentBillSignature(' not in s:
-              s=s.replace(marker,helper+marker,1)
+            function v5Signature(b){
+              if(!b)return "";
+              return "v5|"+v5Norm(b.desc)+"|"+String(b.due||"")+"|"+Number(b.amount||0).toFixed(2);
+            }
 
-          # 3) Replace the installment suppression check with both source-key and stable signature checks.
-          old='''      const deletedKey=tx.id+"|"+i;\n      if(db.deletedInstallmentBills.includes(deletedKey))continue;\n\n      const exists=db.bills.some(b=>'''
-          new='''      const deletedKey=tx.id+"|"+i;\n      const generatedDesc=`${tx.desc} — parcela ${i}/${n}`;\n      const generatedSignature=installmentBillSignature(generatedDesc,dueStr,installmentAmount);\n      if(\n        db.deletedInstallmentBills.includes(deletedKey) ||\n        db.deletedBillSignatures.includes("installment-source|"+tx.id+"|"+i) ||\n        db.deletedBillSignatures.includes(generatedSignature)\n      )continue;\n\n      const exists=db.bills.some(b=>'''
-          if old not in s: raise SystemExit('suppression marker not found')
-          s=s.replace(old,new,1)
-          s=s.replace('desc:`${tx.desc} — parcela ${i}/${n}`,','desc:generatedDesc,',1)
+            function v5SourceKey(b){
+              if(!b)return "";
+              if(b.fromInstallmentId && Number(b.installmentNumber)>0)
+                return b.fromInstallmentId+"|"+Number(b.installmentNumber);
 
-          # 4) Make deleteBill record BOTH the source identity and the stable signature.
-          old='''    if(bill.fromInstallmentId && Number(bill.installmentNumber)>0){\n      if(!Array.isArray(db.deletedInstallmentBills))db.deletedInstallmentBills=[];\n      const key=bill.fromInstallmentId+"|"+Number(bill.installmentNumber);\n      if(!db.deletedInstallmentBills.includes(key))db.deletedInstallmentBills.push(key);\n    }'''
-          new='''    if(bill.fromInstallmentId && Number(bill.installmentNumber)>0){\n      if(!Array.isArray(db.deletedInstallmentBills))db.deletedInstallmentBills=[];\n      if(!Array.isArray(db.deletedBillSignatures))db.deletedBillSignatures=[];\n      const key=bill.fromInstallmentId+"|"+Number(bill.installmentNumber);\n      const sourceSig="installment-source|"+bill.fromInstallmentId+"|"+Number(bill.installmentNumber);\n      const valueSig=installmentBillSignature(bill.desc,bill.due,bill.amount);\n      if(!db.deletedInstallmentBills.includes(key))db.deletedInstallmentBills.push(key);\n      if(!db.deletedBillSignatures.includes(sourceSig))db.deletedBillSignatures.push(sourceSig);\n      if(!db.deletedBillSignatures.includes(valueSig))db.deletedBillSignatures.push(valueSig);\n    }else{\n      if(!Array.isArray(db.deletedBillSignatures))db.deletedBillSignatures=[];\n      const sig=billDeletionSignature(bill);\n      if(sig&&!db.deletedBillSignatures.includes(sig))db.deletedBillSignatures.push(sig);\n    }'''
-          if old not in s: raise SystemExit('delete marker not found')
-          s=s.replace(old,new,1)
+              const text=String(b.desc||"");
+              const m=text.match(/(?:parcela|prestação)\\s*(\\d+)\\s*\\/\\s*(\\d+)/i);
+              if(!m)return "";
+              const idx=Number(m[1]), total=Number(m[2]);
+              if(idx<1||total<2)return "";
 
-          # 5) Before rendering/syncing, remove any regenerated installment that matches a stored suppression signature.
-          old='''  const activeIds=new Set(installmentTx.map(t=>t.id));\n\n  // Remove parcelas abertas que pertencem a lançamentos parcelados.'''
-          new='''  const activeIds=new Set(installmentTx.map(t=>t.id));\n\n  // Remove qualquer parcela aberta que tenha sido explicitamente excluída,\n  // inclusive registros antigos que não possuam fromInstallmentId.\n  if(Array.isArray(db.deletedBillSignatures) && db.deletedBillSignatures.length){\n    db.bills=db.bills.filter(b=>{\n      if(b.paid===true)return true;\n      const sig=billDeletionSignature(b);\n      return !sig || !db.deletedBillSignatures.includes(sig);\n    });\n  }\n\n  // Remove parcelas abertas que pertencem a lançamentos parcelados.'''
-          if old not in s: raise SystemExit('cleanup marker not found')
-          s=s.replace(old,new,1)
+              const base=v5Norm(text.replace(/(?:\\s*[-—–−]\\s*)?(?:parcela|prestação)\\s*\\d+\\s*\\/\\s*\\d+.*$/i,""));
+              const txs=(db.transactions||[]).filter(t=>
+                t && t.type==="expense" && t.payment!=="credit" && Number(t.installments)===total
+              );
 
-          # 6) Ensure old data is migrated safely when the app loads.
-          s=s.replace(
-            'if(!Array.isArray(db.deletedInstallmentBills))db.deletedInstallmentBills=[];\n\n  const installmentTx=',
-            'if(!Array.isArray(db.deletedInstallmentBills))db.deletedInstallmentBills=[];\n  if(!Array.isArray(db.deletedBillSignatures))db.deletedBillSignatures=[];\n\n  const installmentTx=',
-            1
-          )
+              for(const tx of txs){
+                if(v5Norm(tx.desc)!==base)continue;
+                const d=new Date(String(tx.date||"")+"T12:00:00");
+                if(Number.isNaN(d.getTime()))continue;
+                d.setMonth(d.getMonth()+idx-1);
+                const due=d.toISOString().slice(0,10);
+                const part=Number((Number(tx.amount||0)/total).toFixed(2));
+                const last=Number((Number(tx.amount||0)-part*(total-1)).toFixed(2));
+                const expected=idx===total?last:part;
+                if(due===b.due && Math.abs(expected-Number(b.amount||0))<0.005)
+                  return tx.id+"|"+idx;
+              }
+              return "";
+            }
 
+            function v5EnsureArrays(){
+              if(!Array.isArray(db.deletedInstallmentBills))db.deletedInstallmentBills=[];
+              if(!Array.isArray(db.deletedBillSignatures))db.deletedBillSignatures=[];
+            }
+
+            function v5Suppress(b){
+              v5EnsureArrays();
+              const source=v5SourceKey(b);
+              if(source && !db.deletedInstallmentBills.includes(source))db.deletedInstallmentBills.push(source);
+              const sourceSig=source?"installment-source|"+source:"";
+              if(sourceSig&&!db.deletedBillSignatures.includes(sourceSig))db.deletedBillSignatures.push(sourceSig);
+              const sig=v5Signature(b);
+              if(sig&&!db.deletedBillSignatures.includes(sig))db.deletedBillSignatures.push(sig);
+              const oldSig=typeof installmentBillSignature==="function"?installmentBillSignature(b.desc,b.due,b.amount):"";
+              if(oldSig&&!db.deletedBillSignatures.includes(oldSig))db.deletedBillSignatures.push(oldSig);
+            }
+
+            function v5IsSuppressed(b){
+              v5EnsureArrays();
+              const source=v5SourceKey(b);
+              if(source && db.deletedInstallmentBills.includes(source))return true;
+              if(source && db.deletedBillSignatures.includes("installment-source|"+source))return true;
+              const sig=v5Signature(b);
+              if(sig && db.deletedBillSignatures.includes(sig))return true;
+              const oldSig=typeof installmentBillSignature==="function"?installmentBillSignature(b.desc,b.due,b.amount):"";
+              return !!(oldSig && db.deletedBillSignatures.includes(oldSig));
+            }
+
+            /* Migrate the exact legacy row the user has been deleting.
+               This is deliberately narrow: ARMA, installment 1/4, 24/08/2026, R$437,73. */
+            v5EnsureArrays();
+            (db.bills||[]).forEach(b=>{
+              if(b.paid===true)return;
+              if(v5Norm(b.desc)==="arma - parcela 1/4" && b.due==="2026-08-24" && Math.abs(Number(b.amount||0)-437.73)<0.005){
+                v5Suppress(b);
+              }
+            });
+
+            /* Replace the runtime sync function. Legacy rows are resolved back to
+               their original transaction before any new installment is generated. */
+            syncInstallmentExpensesToBills=function(){
+              if(!Array.isArray(db.bills))db.bills=[];
+              if(!Array.isArray(db.transactions))db.transactions=[];
+              v5EnsureArrays();
+
+              db.bills=db.bills.filter(b=>b.paid===true || !v5IsSuppressed(b));
+
+              const txs=db.transactions.filter(t=>
+                t && t.type==="expense" && t.payment!=="credit" && Number(t.installments)>1 && !t.isCardAdjustment
+              );
+
+              txs.forEach(tx=>{
+                const n=Math.max(1,Number(tx.installments)||1);
+                const total=Number(tx.amount)||0;
+                const base=Number((total/n).toFixed(2));
+
+                for(let i=1;i<=n;i++){
+                  const amount=i===n?Number((total-base*(n-1)).toFixed(2)):base;
+                  const d=new Date(String(tx.date||"")+"T12:00:00");
+                  if(Number.isNaN(d.getTime()))continue;
+                  d.setMonth(d.getMonth()+i-1);
+                  const due=d.toISOString().slice(0,10);
+                  const source=tx.id+"|"+i;
+                  const desc=`${tx.desc} — parcela ${i}/${n}`;
+                  const probe={desc,due,amount,fromInstallmentId:tx.id,installmentNumber:i};
+
+                  if(db.deletedInstallmentBills.includes(source) ||
+                     db.deletedBillSignatures.includes("installment-source|"+source) ||
+                     v5IsSuppressed(probe))continue;
+
+                  const exists=db.bills.some(b=>b.fromInstallmentId===tx.id && Number(b.installmentNumber)===i);
+                  if(exists)continue;
+
+                  db.bills.push({
+                    id:uid(),desc,category:tx.category,categoryName:catName(tx.category),amount,due,
+                    nature:tx.nature==="fixed"?"fixed":"variable",payment:tx.payment||"Conta / Pix",
+                    recurring:"no",recurringKey:"",fromInstallmentId:tx.id,installmentNumber:i,
+                    installmentTotal:n,note:tx.note||`Parcela ${i}/${n}`,paid:false,paidDate:"",createdAt:today
+                  });
+                }
+              });
+            };
+
+            /* Replace deletion so even old bills without source metadata get a stable source key. */
+            deleteBill=function(id){
+              const bill=(db.bills||[]).find(x=>x.id===id);
+              if(!bill)return;
+              if(!confirm("Excluir esta conta?"))return;
+
+              if(bill.cardMonthSummary===true && bill.cardId && bill.due){
+                if(!Array.isArray(db.deletedCardBills))db.deletedCardBills=[];
+                const key=bill.cardId+"|"+monthKey(bill.due);
+                if(!db.deletedCardBills.includes(key))db.deletedCardBills.push(key);
+              }
+
+              if(bill.fromInstallmentId || /(?:parcela|prestação)\\s*\\d+\\s*\\/\\s*\\d+/i.test(String(bill.desc||""))){
+                v5Suppress(bill);
+              }
+
+              db.bills=db.bills.filter(x=>x.id!==id);
+              persist("Conta excluída definitivamente.");
+            };
+
+            /* Clean any legacy ARMA row immediately and persist the tombstone. */
+            const before=(db.bills||[]).length;
+            db.bills=(db.bills||[]).filter(b=>b.paid===true || !v5IsSuppressed(b));
+            if(db.bills.length!==before)save();
+          })();
+          '''
+
+          needle='\n(async()=>{\n'
+          if needle not in s:
+              raise SystemExit('startup insertion point not found')
+          s=s.replace(needle,'\n'+patch+'\n(async()=>{',1)
           p.write_text(s,encoding='utf-8')
           PY
+
+      - name: Validate JavaScript
+        run: |
+          node --check index.html
 
       - name: Commit patch
         run: |
@@ -81,5 +199,5 @@ jobs:
             echo 'No changes needed.'
             exit 0
           fi
-          git commit -m 'Fix installment bill deletion permanently'
+          git commit -m 'Fix legacy installment bill deletion permanently'
           git push
