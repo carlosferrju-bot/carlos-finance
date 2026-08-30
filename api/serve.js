@@ -1,5 +1,5 @@
 export default async function handler(req, res) {
-  const sourceUrl = "https://raw.githubusercontent.com/carlosferrju-bot/carlos-finance/main/index.html?arma_guard=12";
+  const sourceUrl = "https://raw.githubusercontent.com/carlosferrju-bot/carlos-finance/main/index.html?arma_guard=13";
   const upstream = await fetch(sourceUrl, { cache: "no-store" });
 
   if (!upstream.ok) {
@@ -15,6 +15,11 @@ export default async function handler(req, res) {
 <script>
 (function(){
   try{
+    // Remove qualquer Service Worker antigo que possa estar servindo uma versão obsoleta.
+    if("serviceWorker" in navigator){
+      navigator.serviceWorker.getRegistrations().then(regs=>regs.forEach(r=>r.unregister())).catch(()=>{});
+    }
+
     const KEY="neonFinanceV1";
     const raw=localStorage.getItem(KEY);
     if(!raw)return;
@@ -58,7 +63,7 @@ export default async function handler(req, res) {
   // Guard final: depois que o aplicativo terminar de sincronizar, remove a
   // mesma conta caso alguma rotina de compatibilidade tenha recriado a linha.
   const finalGuard = `
-/* PERMANENT_LEGACY_ARMA_GUARD_V12 */
+/* PERMANENT_LEGACY_ARMA_GUARD_V13 */
 (function(){
   function blockedArmaBill(b){
     if(!b || b.paid===true) return false;
