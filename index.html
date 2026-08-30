@@ -442,7 +442,7 @@ function updateBackupUI(){
 
 const defaults=["Moradia","Alimentação","Transporte","Saúde","Educação","Lazer","Assinaturas","Salário","Investimentos","Outros"];
 let db=load(), editing=null;
-function empty(){return{transactions:[],fixed:[],bills:[],cards:[],deletedCardBills:[],cardMonthManualValues:{},cardMonthAdjustments:{},cardAdjustments:[],categories:defaults.map((name,i)=>({id:"cat"+i,name,type:["Salário","Investimentos"].includes(name)?"income":"expense"})),goals:{saving:1000,variable:2000}}}
+function empty(){return{transactions:[],fixed:[],bills:[],cards:[],deletedCardBills:[],deletedInstallmentBills:[],cardMonthManualValues:{},cardMonthAdjustments:{},cardAdjustments:[],categories:defaults.map((name,i)=>({id:"cat"+i,name,type:["Salário","Investimentos"].includes(name)?"income":"expense"})),goals:{saving:1000,variable:2000}}}
 function load(){
   try{
     const d=JSON.parse(localStorage.getItem(KEY))||empty();
@@ -451,6 +451,7 @@ function load(){
     if(!Array.isArray(d.bills)) d.bills=[];
     if(!Array.isArray(d.cards)) d.cards=[];
     if(!Array.isArray(d.deletedCardBills)) d.deletedCardBills=[];
+    if(!Array.isArray(d.deletedInstallmentBills)) d.deletedInstallmentBills=[];
     if(!Array.isArray(d.cardAdjustments)) d.cardAdjustments=[];
     if(!d.cardMonthManualValues || typeof d.cardMonthManualValues!=="object") d.cardMonthManualValues={};
     if(!d.cardMonthAdjustments || typeof d.cardMonthAdjustments!=="object") d.cardMonthAdjustments={};
@@ -1223,6 +1224,7 @@ function syncTransactionExpensesToBills(){
   });
 }
 
+/* BILL_DELETE_PERSISTENCE_FIX_V3 */
 /* INSTALLMENT_BILL_DELETE_FIX_V1 */
 function syncInstallmentExpensesToBills(){
   if(!Array.isArray(db.bills))db.bills=[];
