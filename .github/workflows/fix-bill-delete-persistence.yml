@@ -1,0 +1,50 @@
+name: Fix bill deletion persistence
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch localStorage migration for deleted installments
+        shell: bash
+        run: |
+          set -e
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('index.html')
+          s=p.read_text(encoding='utf-8')
+          marker='/* BILL_DELETE_PERSISTENCE_FIX_V3 */'
+          if marker in s:
+              print('Already fixed')
+              raise SystemExit(0)
+          old='deletedCardBills:[],cardMonthManualValues:{}'
+          new='deletedCardBills:[],deletedInstallmentBills:[],cardMonthManualValues:{}'
+          if old not in s: raise SystemExit('empty() target not found')
+          s=s.replace(old,new,1)
+          old='if(!Array.isArray(d.deletedCardBills)) d.deletedCardBills=[];'
+          new='if(!Array.isArray(d.deletedCardBills)) d.deletedCardBills=[];\n    if(!Array.isArray(d.deletedInstallmentBills)) d.deletedInstallmentBills=[];'
+          if old not in s: raise SystemExit('load() target not found')
+          s=s.replace(old,new,1)
+          s=s.replace('/* INSTALLMENT_BILL_DELETE_FIX_V1 */','/* BILL_DELETE_PERSISTENCE_FIX_V3 */\n/* INSTALLMENT_BILL_DELETE_FIX_V1 */',1)
+          p.write_text(s,encoding='utf-8')
+          PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add index.html
+          git commit -m 'Persist deleted installment bills across reloads'
+          git push
+      - name: Remove one-time workflow
+        shell: bash
+        run: |
+          set -e
+          rm -f .github/workflows/fix-bill-delete-persistence.yml
+          git add -u .github/workflows/fix-bill-delete-persistence.yml
+          git commit -m 'Remove one-time bill deletion workflow'
+          git push
