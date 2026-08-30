@@ -91,6 +91,17 @@ export default async function handler(req, res) {
   const insertAt = bodyIndex + "<body>".length;
   html = html.slice(0, insertAt) + migration + html.slice(insertAt);
 
+  // Corrige de forma definitiva a edição manual de valores de parcelas.
+  // O patch é carregado depois do código original, substituindo o handler
+  // de edição das parcelas e preservando o valor em localStorage.
+  const installmentPatch = '<script src="/installment-edit-fix.js?v=20260830"></script>';
+  const bodyEnd = html.toLowerCase().lastIndexOf("</body>");
+  if (bodyEnd === -1) {
+    res.status(500).send("Estrutura do CARLOS FINANCE inválida.");
+    return;
+  }
+  html = html.slice(0, bodyEnd) + installmentPatch + "\n" + html.slice(bodyEnd);
+
   res.setHeader("Content-Type", "text/html; charset=utf-8");
   res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0");
   res.setHeader("Pragma", "no-cache");
