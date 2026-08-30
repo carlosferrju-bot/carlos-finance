@@ -1,14 +1,15 @@
 name: Repair legacy ARMA account
 
 on:
-  push:
-    branches: [main]
+  issue_comment:
+    types: [created]
 
 permissions:
   contents: write
 
 jobs:
   repair:
+    if: github.event.comment.body == 'RUN_LEGACY_ARMA_REPAIR'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -33,13 +34,10 @@ jobs:
 
           patch = r'''/* PERMANENT_LEGACY_ARMA_GUARD_V8 */
 (function(){
-  // This is a permanent data-level tombstone for the specific legacy bill
-  // the user asked to remove. It is NOT a visual filter: it is removed from
-  // db before every persistence operation, so refresh/synchronization cannot
-  // bring it back.
+  // Permanent data-level tombstone for the specific legacy bill.
   function blockedArmaBill(b){
     if(!b) return false;
-    const norm=v=>String(v||"").normalize("NFKC").replace(/[–—−]/g,"-").replace(/\\s+/g," ").trim().toLocaleLowerCase("pt-BR");
+    const norm=v=>String(v||"").normalize("NFKC").replace(/[–—−]/g,"-").replace(/\s+/g," ").trim().toLocaleLowerCase("pt-BR");
     return norm(b.desc)==="arma - parcela 1/4"
       && String(b.due||"")==="2026-08-24"
       && Math.abs(Number(b.amount||0)-437.73)<0.005;
@@ -52,20 +50,17 @@ jobs:
     return db.bills.length!==before;
   }
 
-  // Remove the existing record immediately.
   purgeBlockedArmaBill();
 
-  // Most importantly, make persistence itself authoritative. Any sync routine
-  // may temporarily recreate a legacy row, but it can never be written to
-  // localStorage because save() purges it first.
+  // Persistence is the authoritative boundary. A sync routine may temporarily
+  // recreate the legacy row, but save() removes it before localStorage is written.
   const __armaOriginalSave=save;
   save=function(){
     purgeBlockedArmaBill();
     return __armaOriginalSave.apply(this,arguments);
   };
 
-  // Keep backups clean as well. This prevents an old internal backup from
-  // reintroducing the deleted account after a restore.
+  // Keep internal and external backups clean too.
   const __armaOriginalSaveInternalBackup=saveInternalBackup;
   saveInternalBackup=async function(){
     purgeBlockedArmaBill();
@@ -78,7 +73,6 @@ jobs:
     return __armaOriginalWriteFileBackup.apply(this,arguments);
   };
 
-  // Final runtime sweep before the initial UI is rendered.
   purgeBlockedArmaBill();
 })();
 '''
