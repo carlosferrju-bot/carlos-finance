@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CARLOS FINANCE — Restaurar parcelas ARMA</title>
+<style>
+body{margin:0;background:#050711;color:#fff;font:16px Arial,sans-serif;display:grid;place-items:center;min-height:100vh;text-align:center}.box{max-width:680px;padding:32px}.ok{color:#00f5a0;font-weight:800}.muted{color:#9aacbf}.err{color:#ff6b81}
+</style>
+</head>
+<body><div class="box"><h1>Restaurando parcelas…</h1><p id="status" class="muted">Recriando a origem da compra ARMA sem trazer de volta a parcela de agosto.</p></div>
+<script>
+(async function(){
+ const status=document.getElementById('status');
+ const KEY='neonFinanceV1';
+ const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,8);
+ const norm=v=>String(v??'').normalize('NFKC').replace(/[–—−]/g,'-').replace(/\s+/g,' ').trim().toLocaleLowerCase('pt-BR');
+ try{
+  if('serviceWorker' in navigator){const regs=await navigator.serviceWorker.getRegistrations();await Promise.all(regs.map(r=>r.unregister().catch(()=>false)));}
+  if('caches' in window){const names=await caches.keys();await Promise.all(names.map(n=>caches.delete(n).catch(()=>false)));}
+  const raw=localStorage.getItem(KEY);
+  if(!raw) throw new Error('Dados do CARLOS FINANCE não encontrados neste navegador.');
+  const db=JSON.parse(raw);
+  if(!db||typeof db!=='object')throw new Error('Dados inválidos.');
+  if(!Array.isArray(db.transactions))db.transactions=[];
+  if(!Array.isArray(db.bills))db.bills=[];
+  if(!Array.isArray(db.deletedInstallmentBills))db.deletedInstallmentBills=[];
+  if(!Array.isArray(db.deletedBillSignatures))db.deletedBillSignatures=[];
+
+  // A correção anterior marcou somente a parcela 1/4 de agosto como excluída.
+  // Mantemos essa exclusão e removemos apenas eventuais bloqueios das parcelas futuras.
+  db.deletedInstallmentBills=db.deletedInstallmentBills.filter(k=>!/^ARMA\|[234]\|$/i.test(String(k)));
+  db.deletedBillSignatures=db.deletedBillSignatures.filter(s=>{
+    const x=String(s);
+    return !x.includes('installment-source|') || !x.toLocaleLowerCase('pt-BR').includes('arma');
+  });
+
+  // Se a transação original foi apagada pela correção anterior, restaura sua origem.
+  // Valor total = 4 x R$ 437,73 = R$ 1.750,92.
+  let source=db.transactions.find(t=>t&&t.type==='expense'&&norm(t.desc)==='arma'&&String(t.date||'')==='2026-08-24'&&Number(t.installments)===4);
+  if(!source){
+    source={id:'arma-restored-'+uid(),type:'expense',date:'2026-08-24',desc:'ARMA',amount:1750.92,category:(db.categories||[]).find(c=>norm(c.name)==='outros')?.id || 'cat9',nature:'variable',payment:'Conta / Pix',cardId:'',installments:4,note:'Parcela 1/4',createdAt:new Date().toISOString().slice(0,10)};
+    db.transactions.unshift(source);
+  }
+
+  // Garante as três parcelas futuras. A parcela 1/4 permanece suprimida pela assinatura
+  // gravada na correção anterior.
+  const amount=437.73;
+  const catName=(db.categories||[]).find(c=>c.id===source.category)?.name || 'Outros';
+  for(let i=2;i<=4;i++){
+    const d=new Date('2026-08-24T12:00:00');
+    d.setMonth(d.getMonth()+i-1);
+    const due=d.toISOString().slice(0,10);
+    const desc=`ARMA — parcela ${i}/4`;
+    const exists=db.bills.some(b=>b&&norm(b.desc)===norm(desc)&&String(b.due||'')===due);
+    if(!exists)db.bills.push({id:uid(),desc,category:source.category,categoryName:catName,amount,due,nature:'variable',payment:'Conta / Pix',recurring:'no',recurringKey:'',fromInstallmentId:source.id,installmentNumber:i,installmentTotal:4,note:`Parcela ${i}/4`,paid:false,paidDate:'',createdAt:new Date().toISOString().slice(0,10)});
+  }
+  localStorage.setItem(KEY,JSON.stringify(db));
+  status.innerHTML='<span class="ok">✓ Parcelas restauradas.</span><br><span class="muted">Setembro, outubro e novembro foram recriados. A parcela de agosto continua excluída.</span>';
+  setTimeout(()=>location.replace('/?arma_restore='+Date.now()),1200);
+ }catch(e){console.error(e);status.innerHTML='<span class="err">Não foi possível restaurar automaticamente.</span><br><br>'+String(e.message||e);}
+})();
+</script></body></html>
