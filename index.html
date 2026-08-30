@@ -1223,9 +1223,11 @@ function syncTransactionExpensesToBills(){
   });
 }
 
+/* INSTALLMENT_BILL_DELETE_FIX_V1 */
 function syncInstallmentExpensesToBills(){
   if(!Array.isArray(db.bills))db.bills=[];
   if(!Array.isArray(db.transactions))db.transactions=[];
+  if(!Array.isArray(db.deletedInstallmentBills))db.deletedInstallmentBills=[];
 
   const installmentTx=db.transactions.filter(t=>
     t.type==="expense" &&
@@ -1278,6 +1280,9 @@ function syncInstallmentExpensesToBills(){
       );
 
       const dueStr=due.toISOString().slice(0,10);
+
+      const deletedKey=tx.id+"|"+i;
+      if(db.deletedInstallmentBills.includes(deletedKey))continue;
 
       const exists=db.bills.some(b=>
         b.fromInstallmentId===tx.id &&
@@ -1819,6 +1824,11 @@ function deleteBill(id){
   if(!bill)return;
 
   if(confirm("Excluir esta conta?")){
+    if(bill.fromInstallmentId && Number(bill.installmentNumber)>0){
+      if(!Array.isArray(db.deletedInstallmentBills))db.deletedInstallmentBills=[];
+      const key=bill.fromInstallmentId+"|"+Number(bill.installmentNumber);
+      if(!db.deletedInstallmentBills.includes(key))db.deletedInstallmentBills.push(key);
+    }
     if(bill.cardMonthSummary===true && bill.cardId && bill.due){
       if(!Array.isArray(db.deletedCardBills)) db.deletedCardBills=[];
       const key=bill.cardId+"|"+monthKey(bill.due);
