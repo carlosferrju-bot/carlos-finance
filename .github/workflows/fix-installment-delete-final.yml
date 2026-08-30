@@ -97,8 +97,6 @@ jobs:
               return !!(oldSig && db.deletedBillSignatures.includes(oldSig));
             }
 
-            /* Migrate the exact legacy row the user has been deleting.
-               This is deliberately narrow: ARMA, installment 1/4, 24/08/2026, R$437,73. */
             v5EnsureArrays();
             (db.bills||[]).forEach(b=>{
               if(b.paid===true)return;
@@ -107,13 +105,10 @@ jobs:
               }
             });
 
-            /* Replace the runtime sync function. Legacy rows are resolved back to
-               their original transaction before any new installment is generated. */
             syncInstallmentExpensesToBills=function(){
               if(!Array.isArray(db.bills))db.bills=[];
               if(!Array.isArray(db.transactions))db.transactions=[];
               v5EnsureArrays();
-
               db.bills=db.bills.filter(b=>b.paid===true || !v5IsSuppressed(b));
 
               const txs=db.transactions.filter(t=>
@@ -124,7 +119,6 @@ jobs:
                 const n=Math.max(1,Number(tx.installments)||1);
                 const total=Number(tx.amount)||0;
                 const base=Number((total/n).toFixed(2));
-
                 for(let i=1;i<=n;i++){
                   const amount=i===n?Number((total-base*(n-1)).toFixed(2)):base;
                   const d=new Date(String(tx.date||"")+"T12:00:00");
@@ -134,45 +128,27 @@ jobs:
                   const source=tx.id+"|"+i;
                   const desc=`${tx.desc} — parcela ${i}/${n}`;
                   const probe={desc,due,amount,fromInstallmentId:tx.id,installmentNumber:i};
-
-                  if(db.deletedInstallmentBills.includes(source) ||
-                     db.deletedBillSignatures.includes("installment-source|"+source) ||
-                     v5IsSuppressed(probe))continue;
-
-                  const exists=db.bills.some(b=>b.fromInstallmentId===tx.id && Number(b.installmentNumber)===i);
-                  if(exists)continue;
-
-                  db.bills.push({
-                    id:uid(),desc,category:tx.category,categoryName:catName(tx.category),amount,due,
-                    nature:tx.nature==="fixed"?"fixed":"variable",payment:tx.payment||"Conta / Pix",
-                    recurring:"no",recurringKey:"",fromInstallmentId:tx.id,installmentNumber:i,
-                    installmentTotal:n,note:tx.note||`Parcela ${i}/${n}`,paid:false,paidDate:"",createdAt:today
-                  });
+                  if(db.deletedInstallmentBills.includes(source) || db.deletedBillSignatures.includes("installment-source|"+source) || v5IsSuppressed(probe))continue;
+                  if(db.bills.some(b=>b.fromInstallmentId===tx.id && Number(b.installmentNumber)===i))continue;
+                  db.bills.push({id:uid(),desc,category:tx.category,categoryName:catName(tx.category),amount,due,nature:tx.nature==="fixed"?"fixed":"variable",payment:tx.payment||"Conta / Pix",recurring:"no",recurringKey:"",fromInstallmentId:tx.id,installmentNumber:i,installmentTotal:n,note:tx.note||`Parcela ${i}/${n}`,paid:false,paidDate:"",createdAt:today});
                 }
               });
             };
 
-            /* Replace deletion so even old bills without source metadata get a stable source key. */
             deleteBill=function(id){
               const bill=(db.bills||[]).find(x=>x.id===id);
               if(!bill)return;
               if(!confirm("Excluir esta conta?"))return;
-
               if(bill.cardMonthSummary===true && bill.cardId && bill.due){
                 if(!Array.isArray(db.deletedCardBills))db.deletedCardBills=[];
                 const key=bill.cardId+"|"+monthKey(bill.due);
                 if(!db.deletedCardBills.includes(key))db.deletedCardBills.push(key);
               }
-
-              if(bill.fromInstallmentId || /(?:parcela|prestação)\\s*\\d+\\s*\\/\\s*\\d+/i.test(String(bill.desc||""))){
-                v5Suppress(bill);
-              }
-
+              if(bill.fromInstallmentId || /(?:parcela|prestação)\\s*\\d+\\s*\\/\\s*\\d+/i.test(String(bill.desc||"")))v5Suppress(bill);
               db.bills=db.bills.filter(x=>x.id!==id);
               persist("Conta excluída definitivamente.");
             };
 
-            /* Clean any legacy ARMA row immediately and persist the tombstone. */
             const before=(db.bills||[]).length;
             db.bills=(db.bills||[]).filter(b=>b.paid===true || !v5IsSuppressed(b));
             if(db.bills.length!==before)save();
@@ -180,15 +156,22 @@ jobs:
           '''
 
           needle='\n(async()=>{\n'
-          if needle not in s:
-              raise SystemExit('startup insertion point not found')
+          if needle not in s: raise SystemExit('startup insertion point not found')
           s=s.replace(needle,'\n'+patch+'\n(async()=>{',1)
           p.write_text(s,encoding='utf-8')
           PY
 
-      - name: Validate JavaScript
+      - name: Validate HTML script
         run: |
-          node --check index.html
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          s=Path('index.html').read_text(encoding='utf-8')
+          scripts=re.findall(r'<script[^>]*>(.*?)</script>',s,re.S)
+          if not scripts: raise SystemExit('No script found')
+          Path('/tmp/app.js').write_text('\n'.join(scripts),encoding='utf-8')
+          PY
+          node --check /tmp/app.js
 
       - name: Commit patch
         run: |
