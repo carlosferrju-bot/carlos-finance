@@ -14,7 +14,7 @@
     const response=await fetch('/index.html?patched-source='+Date.now(),{cache:'no-store'});
     if(!response.ok)throw new Error('Falha ao carregar o aplicativo');
     let html=await response.text();
-    const patch='<script src="/installment-edit-fix.js?patched='+Date.now()+'"><\\/script>';
+    const patch='<script src="/installment-edit-fix.js?patched='+Date.now()+'">'+'</scr'+'ipt>';
     if(!html.includes('/installment-edit-fix.js')){
       const marker='</body>';
       if(!html.includes(marker))throw new Error('Estrutura do aplicativo inválida');
