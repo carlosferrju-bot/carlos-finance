@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CARLOS FINANCE — Correção de dados</title>
+<style>
+body{margin:0;background:#050711;color:#fff;font:16px Arial,sans-serif;display:grid;place-items:center;min-height:100vh;text-align:center}
+.box{max-width:620px;padding:32px}.ok{color:#00f5a0;font-weight:800}.muted{color:#9aacbf}
+</style>
+</head>
+<body>
+<div class="box">
+<h1>Corrigindo os dados…</h1>
+<p id="status" class="muted">Removendo o registro antigo da ARMA e limpando versões antigas em cache.</p>
+</div>
+<script>
+(async function(){
+  const status=document.getElementById('status');
+  const KEY='neonFinanceV1';
+  const norm=v=>String(v??'').normalize('NFKC').replace(/[–—−]/g,'-').replace(/\s+/g,' ').trim().toLocaleLowerCase('pt-BR');
+  try{
+    // Primeiro desativa qualquer Service Worker antigo que possa estar entregando uma versão velha do app.
+    if('serviceWorker' in navigator){
+      const regs=await navigator.serviceWorker.getRegistrations();
+      await Promise.all(regs.map(r=>r.unregister().catch(()=>false)));
+    }
+    // Limpa caches criados por versões antigas do aplicativo.
+    if('caches' in window){
+      const names=await caches.keys();
+      await Promise.all(names.map(n=>caches.delete(n).catch(()=>false)));
+    }
+
+    const raw=localStorage.getItem(KEY);
+    if(raw){
+      const db=JSON.parse(raw);
+      if(db&&typeof db==='object'){
+        if(!Array.isArray(db.transactions))db.transactions=[];
+        if(!Array.isArray(db.bills))db.bills=[];
+
+        // Remove a origem ARMA mesmo que o valor/quantidade tenham sido
+        // alterados por alguma versão intermediária do aplicativo.
+        const armaIds=new Set();
+        db.transactions=db.transactions.filter(t=>{
+          const isArma=t&&t.type==='expense'&&t.payment!=='credit'&&norm(t.desc)==='arma'&&String(t.date||'')==='2026-08-24';
+          if(isArma)armaIds.add(String(t.id));
+          return !isArma;
+        });
+
+        // Remove todas as parcelas da origem e a linha legada conhecida.
+        db.bills=db.bills.filter(b=>{
+          if(!b)return false;
+          if(b.fromInstallmentId&&armaIds.has(String(b.fromInstallmentId)))return false;
+          const d=norm(b.desc);
+          if(/^arma - parcela \d+\/\d+$/.test(d))return false;
+          if(d.includes('arma')&&d.includes('parcela'))return false;
+          if(d==='arma'&&String(b.due||'')==='2026-08-24')return false;
+          return true;
+        });
+
+        if(!Array.isArray(db.deletedInstallmentBills))db.deletedInstallmentBills=[];
+        if(!Array.isArray(db.deletedBillSignatures))db.deletedBillSignatures=[];
+        // Marca a assinatura conhecida como excluída para impedir recriação.
+        const sig='installment-signature|ARMA — parcela 1/4|2026-08-24|437.73';
+        if(!db.deletedBillSignatures.includes(sig))db.deletedBillSignatures.push(sig);
+        localStorage.setItem(KEY,JSON.stringify(db));
+      }
+    }
+
+    status.innerHTML='<span class="ok">✓ Correção concluída.</span><br><span class="muted">Abrindo o CARLOS FINANCE novamente…</span>';
+    setTimeout(()=>location.replace('/?arma_fix='+Date.now()),500);
+  }catch(e){
+    console.error(e);
+    status.innerHTML='<span style="color:#ff6b81">Não foi possível concluir a correção automaticamente.</span>';
+  }
+})();
+</script>
+</body>
+</html>
