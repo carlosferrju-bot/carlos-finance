@@ -1,0 +1,85 @@
+name: Final fix for installment bill deletion
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Patch installment deletion persistence
+        shell: bash
+        run: |
+          set -e
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('index.html')
+          s=p.read_text(encoding='utf-8')
+
+          # 1) Add a second, legacy-safe suppression list.
+          s=s.replace(
+            'deletedCardBills:[],deletedInstallmentBills:[],cardMonthManualValues:{}',
+            'deletedCardBills:[],deletedInstallmentBills:[],deletedBillSignatures:[],cardMonthManualValues:{}',
+            1
+          )
+          s=s.replace(
+            'if(!Array.isArray(d.deletedInstallmentBills)) d.deletedInstallmentBills=[];\n    if(!Array.isArray(d.cardAdjustments))',
+            'if(!Array.isArray(d.deletedInstallmentBills)) d.deletedInstallmentBills=[];\n    if(!Array.isArray(d.deletedBillSignatures)) d.deletedBillSignatures=[];\n    if(!Array.isArray(d.cardAdjustments))',
+            1
+          )
+
+          # 2) Add a stable signature that survives regeneration with a new bill id.
+          marker='function syncInstallmentExpensesToBills(){'
+          helper='''function installmentBillSignature(desc,due,amount){\n  return "installment-signature|"+String(desc||"").trim()+"|"+String(due||"")+"|"+Number(amount||0).toFixed(2);\n}\n\nfunction billDeletionSignature(b){\n  if(!b)return "";\n  if(b.fromInstallmentId && Number(b.installmentNumber)>0){\n    return "installment-source|"+b.fromInstallmentId+"|"+Number(b.installmentNumber);\n  }\n  return installmentBillSignature(b.desc,b.due,b.amount);\n}\n\n'''
+          if marker not in s: raise SystemExit('sync marker not found')
+          if 'function installmentBillSignature(' not in s:
+              s=s.replace(marker,helper+marker,1)
+
+          # 3) Replace the installment suppression check with both source-key and stable signature checks.
+          old='''      const deletedKey=tx.id+"|"+i;\n      if(db.deletedInstallmentBills.includes(deletedKey))continue;\n\n      const exists=db.bills.some(b=>'''
+          new='''      const deletedKey=tx.id+"|"+i;\n      const generatedDesc=`${tx.desc} — parcela ${i}/${n}`;\n      const generatedSignature=installmentBillSignature(generatedDesc,dueStr,installmentAmount);\n      if(\n        db.deletedInstallmentBills.includes(deletedKey) ||\n        db.deletedBillSignatures.includes("installment-source|"+tx.id+"|"+i) ||\n        db.deletedBillSignatures.includes(generatedSignature)\n      )continue;\n\n      const exists=db.bills.some(b=>'''
+          if old not in s: raise SystemExit('suppression marker not found')
+          s=s.replace(old,new,1)
+          s=s.replace('desc:`${tx.desc} — parcela ${i}/${n}`,','desc:generatedDesc,',1)
+
+          # 4) Make deleteBill record BOTH the source identity and the stable signature.
+          old='''    if(bill.fromInstallmentId && Number(bill.installmentNumber)>0){\n      if(!Array.isArray(db.deletedInstallmentBills))db.deletedInstallmentBills=[];\n      const key=bill.fromInstallmentId+"|"+Number(bill.installmentNumber);\n      if(!db.deletedInstallmentBills.includes(key))db.deletedInstallmentBills.push(key);\n    }'''
+          new='''    if(bill.fromInstallmentId && Number(bill.installmentNumber)>0){\n      if(!Array.isArray(db.deletedInstallmentBills))db.deletedInstallmentBills=[];\n      if(!Array.isArray(db.deletedBillSignatures))db.deletedBillSignatures=[];\n      const key=bill.fromInstallmentId+"|"+Number(bill.installmentNumber);\n      const sourceSig="installment-source|"+bill.fromInstallmentId+"|"+Number(bill.installmentNumber);\n      const valueSig=installmentBillSignature(bill.desc,bill.due,bill.amount);\n      if(!db.deletedInstallmentBills.includes(key))db.deletedInstallmentBills.push(key);\n      if(!db.deletedBillSignatures.includes(sourceSig))db.deletedBillSignatures.push(sourceSig);\n      if(!db.deletedBillSignatures.includes(valueSig))db.deletedBillSignatures.push(valueSig);\n    }else{\n      if(!Array.isArray(db.deletedBillSignatures))db.deletedBillSignatures=[];\n      const sig=billDeletionSignature(bill);\n      if(sig&&!db.deletedBillSignatures.includes(sig))db.deletedBillSignatures.push(sig);\n    }'''
+          if old not in s: raise SystemExit('delete marker not found')
+          s=s.replace(old,new,1)
+
+          # 5) Before rendering/syncing, remove any regenerated installment that matches a stored suppression signature.
+          old='''  const activeIds=new Set(installmentTx.map(t=>t.id));\n\n  // Remove parcelas abertas que pertencem a lançamentos parcelados.'''
+          new='''  const activeIds=new Set(installmentTx.map(t=>t.id));\n\n  // Remove qualquer parcela aberta que tenha sido explicitamente excluída,\n  // inclusive registros antigos que não possuam fromInstallmentId.\n  if(Array.isArray(db.deletedBillSignatures) && db.deletedBillSignatures.length){\n    db.bills=db.bills.filter(b=>{\n      if(b.paid===true)return true;\n      const sig=billDeletionSignature(b);\n      return !sig || !db.deletedBillSignatures.includes(sig);\n    });\n  }\n\n  // Remove parcelas abertas que pertencem a lançamentos parcelados.'''
+          if old not in s: raise SystemExit('cleanup marker not found')
+          s=s.replace(old,new,1)
+
+          # 6) Ensure old data is migrated safely when the app loads.
+          s=s.replace(
+            'if(!Array.isArray(db.deletedInstallmentBills))db.deletedInstallmentBills=[];\n\n  const installmentTx=',
+            'if(!Array.isArray(db.deletedInstallmentBills))db.deletedInstallmentBills=[];\n  if(!Array.isArray(db.deletedBillSignatures))db.deletedBillSignatures=[];\n\n  const installmentTx=',
+            1
+          )
+
+          p.write_text(s,encoding='utf-8')
+          PY
+
+      - name: Commit patch
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add index.html
+          if git diff --cached --quiet; then
+            echo 'No changes needed.'
+            exit 0
+          fi
+          git commit -m 'Fix installment bill deletion permanently'
+          git push
