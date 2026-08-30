@@ -1,0 +1,63 @@
+name: Fix bill deletion persistence
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Patch installment bill deletion
+        shell: bash
+        run: |
+          set -e
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('index.html')
+          s=p.read_text(encoding='utf-8')
+          marker='/* INSTALLMENT_BILL_DELETE_FIX_V1 */'
+          if marker in s:
+              print('Installment deletion fix already applied.')
+              raise SystemExit(0)
+
+          # Add a persistent tombstone list for individually deleted installment bills.
+          old='''function syncInstallmentExpensesToBills(){\n  if(!Array.isArray(db.bills))db.bills=[];\n  if(!Array.isArray(db.transactions))db.transactions=[];'''
+          new='''/* INSTALLMENT_BILL_DELETE_FIX_V1 */\nfunction syncInstallmentExpensesToBills(){\n  if(!Array.isArray(db.bills))db.bills=[];\n  if(!Array.isArray(db.transactions))db.transactions=[];\n  if(!Array.isArray(db.deletedInstallmentBills))db.deletedInstallmentBills=[];'''
+          if old not in s: raise SystemExit('sync function marker not found')
+          s=s.replace(old,new,1)
+
+          # Prevent the synchronizer from recreating a specific installment that the user deleted.
+          old='''      const exists=db.bills.some(b=>\n        b.fromInstallmentId===tx.id &&\n        Number(b.installmentNumber)===i\n      );\n\n      if(exists)continue;'''
+          new='''      const deletedKey=tx.id+"|"+i;\n      if(db.deletedInstallmentBills.includes(deletedKey))continue;\n\n      const exists=db.bills.some(b=>\n        b.fromInstallmentId===tx.id &&\n        Number(b.installmentNumber)===i\n      );\n\n      if(exists)continue;'''
+          if old not in s: raise SystemExit('installment creation marker not found')
+          s=s.replace(old,new,1)
+
+          # When deleting a generated installment bill, record that exact installment as intentionally deleted.
+          old='''function deleteBill(id){\n  const bill=(db.bills||[]).find(x=>x.id===id);\n  if(!bill)return;\n\n  if(confirm("Excluir esta conta?")){'''
+          new='''function deleteBill(id){\n  const bill=(db.bills||[]).find(x=>x.id===id);\n  if(!bill)return;\n\n  if(confirm("Excluir esta conta?")){\n    if(bill.fromInstallmentId && Number(bill.installmentNumber)>0){\n      if(!Array.isArray(db.deletedInstallmentBills))db.deletedInstallmentBills=[];\n      const key=bill.fromInstallmentId+"|"+Number(bill.installmentNumber);\n      if(!db.deletedInstallmentBills.includes(key))db.deletedInstallmentBills.push(key);\n    }'''
+          if old not in s: raise SystemExit('delete function marker not found')
+          s=s.replace(old,new,1)
+
+          p.write_text(s,encoding='utf-8')
+          PY
+
+      - name: Commit and remove one-time workflow
+        shell: bash
+        run: |
+          set -e
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add index.html
+          git commit -m 'Fix deletion persistence for monthly installment bills'
+          git push
+          rm -f .github/workflows/fix-bill-delete.yml
+          git add -u .github/workflows/fix-bill-delete.yml
+          git commit -m 'Remove one-time bill deletion fix workflow'
+          git push
