@@ -1,0 +1,86 @@
+name: Apply permanent legacy bill guard
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install permanent guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('index.html')
+          s=p.read_text(encoding='utf-8')
+          marker='/* LEGACY_ARMA_PERMANENT_GUARD_V7 */'
+          if marker in s:
+              print('V7 already installed')
+              raise SystemExit(0)
+          patch=r'''/* LEGACY_ARMA_PERMANENT_GUARD_V7 */
+          (function(){
+            function v7Norm(v){
+              return String(v||'').normalize('NFKC').replace(/[–—−]/g,'-').replace(/\s+/g,' ').trim().toLocaleLowerCase('pt-BR');
+            }
+            function v7LegacyArma(b){
+              if(!b || b.paid===true) return false;
+              const desc=v7Norm(b.desc);
+              const due=String(b.due||'');
+              const amount=Number(b.amount||0);
+              return desc==='arma - parcela 1/4' && due==='2026-08-24' && Math.abs(amount-437.73)<0.005;
+            }
+            function v7PurgeLegacyArma(){
+              if(!Array.isArray(db.bills)) return false;
+              const before=db.bills.length;
+              db.bills=db.bills.filter(b=>!v7LegacyArma(b));
+              return db.bills.length!==before;
+            }
+            const v7OriginalSync=syncInstallmentExpensesToBills;
+            syncInstallmentExpensesToBills=function(){
+              v7PurgeLegacyArma();
+              v7OriginalSync();
+              v7PurgeLegacyArma();
+            };
+            const v7OriginalDeleteBill=deleteBill;
+            deleteBill=function(id){
+              v7OriginalDeleteBill(id);
+              v7PurgeLegacyArma();
+            };
+            if(v7PurgeLegacyArma()) save();
+          })();
+          '''
+          needle='\n(async()=>{'
+          if needle not in s:
+              raise SystemExit('startup insertion point not found')
+          s=s.replace(needle,'\n'+patch+'\n(async()=>{',1)
+          p.write_text(s,encoding='utf-8')
+          PY
+      - name: Validate JavaScript
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          s=Path('index.html').read_text(encoding='utf-8')
+          scripts=re.findall(r'<script[^>]*>(.*?)</script>',s,re.S)
+          Path('/tmp/app.js').write_text('\n'.join(scripts),encoding='utf-8')
+          PY
+          node --check /tmp/app.js
+      - name: Commit patch
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add index.html
+          if git diff --cached --quiet; then
+            echo 'No changes needed.'
+            exit 0
+          fi
+          git commit -m 'Permanently guard legacy ARMA installment bill'
+          git push
