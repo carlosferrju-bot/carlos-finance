@@ -1,0 +1,46 @@
+name: Fix robust bill deletion
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch deletion persistence
+        shell: bash
+        run: |
+          set -e
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('index.html')
+          s=p.read_text(encoding='utf-8')
+          marker='/* ROBUST_BILL_DELETE_FIX_V2 */'
+          if marker in s:
+              raise SystemExit(0)
+          s=s.replace('function syncInstallmentExpensesToBills(){', marker+'\nfunction billDeleteKey(b){\n  if(!b)return"";\n  return String(b.desc||"").trim()+"|"+String(b.due||"")+"|"+Number(b.amount||0).toFixed(2);\n}\nfunction syncInstallmentExpensesToBills(){',1)
+          s=s.replace('if(!Array.isArray(db.deletedInstallmentBills))db.deletedInstallmentBills=[];\n\n  const installmentTx=', 'if(!Array.isArray(db.deletedInstallmentBills))db.deletedInstallmentBills=[];\n  if(!Array.isArray(db.deletedBillKeys))db.deletedBillKeys=[];\n\n  const installmentTx=',1)
+          s=s.replace('const deletedKey=tx.id+"|"+i;\n      if(db.deletedInstallmentBills.includes(deletedKey))continue;', 'const deletedKey=tx.id+"|"+i;\n      const genericDeleteKey=String(tx.desc||"").trim()+" — parcela "+i+"/"+n+"|"+dueStr+"|"+Number(installmentAmount).toFixed(2);\n      if(db.deletedInstallmentBills.includes(deletedKey)||db.deletedBillKeys.includes(genericDeleteKey))continue;',1)
+          s=s.replace('if(confirm("Excluir esta conta?")){\n    if(bill.fromInstallmentId', 'if(confirm("Excluir esta conta?")){\n    if(!Array.isArray(db.deletedBillKeys))db.deletedBillKeys=[];\n    const genericDeleteKey=billDeleteKey(bill);\n    if(genericDeleteKey&&!db.deletedBillKeys.includes(genericDeleteKey))db.deletedBillKeys.push(genericDeleteKey);\n    if(bill.fromInstallmentId',1)
+          needle='\n  });\n}\nfunction syncCardExpensesToBills(){'
+          replacement='\n  });\n\n  if(Array.isArray(db.deletedBillKeys)&&db.deletedBillKeys.length){\n    db.bills=db.bills.filter(b=>b.paid===true||!db.deletedBillKeys.includes(billDeleteKey(b)));\n  }\n}\nfunction syncCardExpensesToBills(){'
+          if needle not in s: raise SystemExit('sync boundary not found')
+          s=s.replace(needle,replacement,1)
+          s=s.replace('deletedCardBills:[],cardMonthManualValues:', 'deletedCardBills:[],deletedBillKeys:[],cardMonthManualValues:',1)
+          s=s.replace('if(!Array.isArray(d.deletedCardBills)) d.deletedCardBills=[];', 'if(!Array.isArray(d.deletedCardBills)) d.deletedCardBills=[];\n    if(!Array.isArray(d.deletedBillKeys)) d.deletedBillKeys=[];',1)
+          p.write_text(s,encoding='utf-8')
+          PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add index.html
+          git commit -m 'Fix legacy bill deletion persistence'
+          git push
+          rm -f .github/workflows/fix-robust-bill-delete.yml
+          git add -u .github/workflows/fix-robust-bill-delete.yml
+          git commit -m 'Remove one-time robust bill deletion workflow'
+          git push
