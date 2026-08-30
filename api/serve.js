@@ -1,5 +1,5 @@
 export default async function handler(req, res) {
-  const sourceUrl = "https://raw.githubusercontent.com/carlosferrju-bot/carlos-finance/main/index.html?arma_guard=9";
+  const sourceUrl = "https://raw.githubusercontent.com/carlosferrju-bot/carlos-finance/main/index.html?arma_guard=10";
   const upstream = await fetch(sourceUrl, { cache: "no-store" });
 
   if (!upstream.ok) {
@@ -9,7 +9,7 @@ export default async function handler(req, res) {
 
   let html = await upstream.text();
 
-  const marker = "/* PERMANENT_LEGACY_ARMA_GUARD_V9 */";
+  const marker = "/* PERMANENT_LEGACY_ARMA_GUARD_V10 */";
   const guard = `
 ${marker}
 (function(){
@@ -22,20 +22,54 @@ ${marker}
   }
   function purgeBlockedArmaBill(){
     if(!Array.isArray(db.bills)) db.bills=[];
+    const before=db.bills.length;
     db.bills=db.bills.filter(b=>!blockedArmaBill(b));
+    return db.bills.length!==before;
   }
-  purgeBlockedArmaBill();
+
+  /*
+   * A simples exclusão do registro não é suficiente porque o sincronizador
+   * de parcelas pode recriá-lo durante render(). Portanto o bloqueio é feito
+   * também no ponto em que as parcelas são sincronizadas.
+   */
+  if(typeof syncInstallmentExpensesToBills==="function"){
+    const originalSyncInstallments=syncInstallmentExpensesToBills;
+    syncInstallmentExpensesToBills=function(){
+      const result=originalSyncInstallments.apply(this,arguments);
+      purgeBlockedArmaBill();
+      return result;
+    };
+  }
+
   const originalSave=save;
-  save=function(){ purgeBlockedArmaBill(); return originalSave.apply(this,arguments); };
+  save=function(){
+    purgeBlockedArmaBill();
+    return originalSave.apply(this,arguments);
+  };
+
   if(typeof saveInternalBackup==="function"){
     const originalSaveInternalBackup=saveInternalBackup;
-    saveInternalBackup=async function(){ purgeBlockedArmaBill(); return originalSaveInternalBackup.apply(this,arguments); };
+    saveInternalBackup=async function(){
+      purgeBlockedArmaBill();
+      return originalSaveInternalBackup.apply(this,arguments);
+    };
   }
+
   if(typeof writeFileBackup==="function"){
     const originalWriteFileBackup=writeFileBackup;
-    writeFileBackup=async function(){ purgeBlockedArmaBill(); return originalWriteFileBackup.apply(this,arguments); };
+    writeFileBackup=async function(){
+      purgeBlockedArmaBill();
+      return originalWriteFileBackup.apply(this,arguments);
+    };
   }
-  purgeBlockedArmaBill();
+
+  /* Corrige imediatamente uma cópia antiga que já esteja no localStorage. */
+  if(purgeBlockedArmaBill()) originalSave();
+
+  /*
+   * O service worker é apenas auxiliar de atualização. O bloqueio acima é
+   * independente dele e funciona mesmo sem service worker/cache.
+   */
   if(!window.__carlosFinanceSWRegistered && "serviceWorker" in navigator){
     window.__carlosFinanceSWRegistered=true;
     navigator.serviceWorker.register("/sw.js",{scope:"/"}).catch(()=>{});
