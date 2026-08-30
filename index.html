@@ -442,7 +442,7 @@ function updateBackupUI(){
 
 const defaults=["Moradia","Alimentação","Transporte","Saúde","Educação","Lazer","Assinaturas","Salário","Investimentos","Outros"];
 let db=load(), editing=null;
-function empty(){return{transactions:[],fixed:[],bills:[],cards:[],deletedCardBills:[],deletedInstallmentBills:[],cardMonthManualValues:{},cardMonthAdjustments:{},cardAdjustments:[],categories:defaults.map((name,i)=>({id:"cat"+i,name,type:["Salário","Investimentos"].includes(name)?"income":"expense"})),goals:{saving:1000,variable:2000}}}
+function empty(){return{transactions:[],fixed:[],bills:[],cards:[],deletedCardBills:[],deletedInstallmentBills:[],deletedBillSignatures:[],cardMonthManualValues:{},cardMonthAdjustments:{},cardAdjustments:[],categories:defaults.map((name,i)=>({id:"cat"+i,name,type:["Salário","Investimentos"].includes(name)?"income":"expense"})),goals:{saving:1000,variable:2000}}}
 function load(){
   try{
     const d=JSON.parse(localStorage.getItem(KEY))||empty();
@@ -452,6 +452,7 @@ function load(){
     if(!Array.isArray(d.cards)) d.cards=[];
     if(!Array.isArray(d.deletedCardBills)) d.deletedCardBills=[];
     if(!Array.isArray(d.deletedInstallmentBills)) d.deletedInstallmentBills=[];
+    if(!Array.isArray(d.deletedBillSignatures)) d.deletedBillSignatures=[];
     if(!Array.isArray(d.cardAdjustments)) d.cardAdjustments=[];
     if(!d.cardMonthManualValues || typeof d.cardMonthManualValues!=="object") d.cardMonthManualValues={};
     if(!d.cardMonthAdjustments || typeof d.cardMonthAdjustments!=="object") d.cardMonthAdjustments={};
@@ -1226,10 +1227,23 @@ function syncTransactionExpensesToBills(){
 
 /* BILL_DELETE_PERSISTENCE_FIX_V3 */
 /* INSTALLMENT_BILL_DELETE_FIX_V1 */
+function installmentBillSignature(desc,due,amount){
+  return "installment-signature|"+String(desc||"").trim()+"|"+String(due||"")+"|"+Number(amount||0).toFixed(2);
+}
+
+function billDeletionSignature(b){
+  if(!b)return "";
+  if(b.fromInstallmentId && Number(b.installmentNumber)>0){
+    return "installment-source|"+b.fromInstallmentId+"|"+Number(b.installmentNumber);
+  }
+  return installmentBillSignature(b.desc,b.due,b.amount);
+}
+
 function syncInstallmentExpensesToBills(){
   if(!Array.isArray(db.bills))db.bills=[];
   if(!Array.isArray(db.transactions))db.transactions=[];
   if(!Array.isArray(db.deletedInstallmentBills))db.deletedInstallmentBills=[];
+  if(!Array.isArray(db.deletedBillSignatures))db.deletedBillSignatures=[];
 
   const installmentTx=db.transactions.filter(t=>
     t.type==="expense" &&
@@ -1239,6 +1253,16 @@ function syncInstallmentExpensesToBills(){
   );
 
   const activeIds=new Set(installmentTx.map(t=>t.id));
+
+  // Remove qualquer parcela aberta que tenha sido explicitamente excluída,
+  // inclusive registros antigos que não possuam fromInstallmentId.
+  if(Array.isArray(db.deletedBillSignatures) && db.deletedBillSignatures.length){
+    db.bills=db.bills.filter(b=>{
+      if(b.paid===true)return true;
+      const sig=billDeletionSignature(b);
+      return !sig || !db.deletedBillSignatures.includes(sig);
+    });
+  }
 
   // Remove parcelas abertas que pertencem a lançamentos parcelados.
   // Se o lançamento original foi excluído, seu ID deixa de estar em activeIds;
@@ -1284,7 +1308,13 @@ function syncInstallmentExpensesToBills(){
       const dueStr=due.toISOString().slice(0,10);
 
       const deletedKey=tx.id+"|"+i;
-      if(db.deletedInstallmentBills.includes(deletedKey))continue;
+      const generatedDesc=`${tx.desc} — parcela ${i}/${n}`;
+      const generatedSignature=installmentBillSignature(generatedDesc,dueStr,installmentAmount);
+      if(
+        db.deletedInstallmentBills.includes(deletedKey) ||
+        db.deletedBillSignatures.includes("installment-source|"+tx.id+"|"+i) ||
+        db.deletedBillSignatures.includes(generatedSignature)
+      )continue;
 
       const exists=db.bills.some(b=>
         b.fromInstallmentId===tx.id &&
@@ -1295,7 +1325,7 @@ function syncInstallmentExpensesToBills(){
 
       db.bills.push({
         id:uid(),
-        desc:`${tx.desc} — parcela ${i}/${n}`,
+        desc:generatedDesc,
         category:tx.category,
         categoryName:catName(tx.category),
         amount:installmentAmount,
@@ -1828,8 +1858,17 @@ function deleteBill(id){
   if(confirm("Excluir esta conta?")){
     if(bill.fromInstallmentId && Number(bill.installmentNumber)>0){
       if(!Array.isArray(db.deletedInstallmentBills))db.deletedInstallmentBills=[];
+      if(!Array.isArray(db.deletedBillSignatures))db.deletedBillSignatures=[];
       const key=bill.fromInstallmentId+"|"+Number(bill.installmentNumber);
+      const sourceSig="installment-source|"+bill.fromInstallmentId+"|"+Number(bill.installmentNumber);
+      const valueSig=installmentBillSignature(bill.desc,bill.due,bill.amount);
       if(!db.deletedInstallmentBills.includes(key))db.deletedInstallmentBills.push(key);
+      if(!db.deletedBillSignatures.includes(sourceSig))db.deletedBillSignatures.push(sourceSig);
+      if(!db.deletedBillSignatures.includes(valueSig))db.deletedBillSignatures.push(valueSig);
+    }else{
+      if(!Array.isArray(db.deletedBillSignatures))db.deletedBillSignatures=[];
+      const sig=billDeletionSignature(bill);
+      if(sig&&!db.deletedBillSignatures.includes(sig))db.deletedBillSignatures.push(sig);
     }
     if(bill.cardMonthSummary===true && bill.cardId && bill.due){
       if(!Array.isArray(db.deletedCardBills)) db.deletedCardBills=[];
