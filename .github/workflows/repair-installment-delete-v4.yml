@@ -1,0 +1,163 @@
+name: Repair legacy installment bill deletion
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/repair-installment-delete-v4.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Patch installment deletion logic
+        shell: python
+        run: |
+          from pathlib import Path
+          p = Path('index.html')
+          s = p.read_text(encoding='utf-8')
+          marker = '/* INSTALLMENT_DELETE_REPAIR_V4 */'
+          if marker in s:
+              print('Repair already applied')
+              raise SystemExit(0)
+
+          old = '''function installmentBillSignature(desc,due,amount){
+  return "installment-signature|"+String(desc||"").trim()+"|"+String(due||"")+"|"+Number(amount||0).toFixed(2);
+}
+
+function billDeletionSignature(b){
+  if(!b)return "";
+  if(b.fromInstallmentId && Number(b.installmentNumber)>0){
+    return "installment-source|"+b.fromInstallmentId+"|"+Number(b.installmentNumber);
+  }
+  return installmentBillSignature(b.desc,b.due,b.amount);
+}
+'''
+
+          new = '''/* INSTALLMENT_DELETE_REPAIR_V4 */
+function installmentBillSignature(desc,due,amount){
+  return "installment-signature|"+String(desc||"").trim()+"|"+String(due||"")+"|"+Number(amount||0).toFixed(2);
+}
+
+function normalizeInstallmentText(v){
+  return String(v||"").replace(/[–—−]/g,"-").replace(/\\s+/g," ").trim().toLocaleLowerCase("pt-BR");
+}
+
+function findInstallmentSourceKey(b){
+  if(!b)return "";
+  if(b.fromInstallmentId && Number(b.installmentNumber)>0){
+    return b.fromInstallmentId+"|"+Number(b.installmentNumber);
+  }
+
+  const text=String(b.desc||"");
+  const match=text.match(/(?:parcela|prestação)\\s*(\\d+)\\s*\\/\\s*(\\d+)/i);
+  if(!match)return "";
+  const index=Number(match[1]);
+  const total=Number(match[2]);
+  if(index<1||total<2)return "";
+
+  const prefix=normalizeInstallmentText(text.replace(/(?:\\s*[—–−-]\\s*)?(?:parcela|prestação)\\s*\\d+\\s*\\/\\s*\\d+.*$/i,""));
+
+  const tx=(db.transactions||[]).find(t=>{
+    if(!t||t.type!=="expense"||t.payment==="credit"||Number(t.installments)!==total)return false;
+    const txPrefix=normalizeInstallmentText(t.desc);
+    if(txPrefix!==prefix)return false;
+
+    const d=new Date(String(t.date||"")+"T12:00:00");
+    if(Number.isNaN(d.getTime()))return false;
+    d.setMonth(d.getMonth()+index-1);
+    const due=d.toISOString().slice(0,10);
+    const amount=Number((Number(t.amount||0)/total).toFixed(2));
+    const lastAmount=Number((Number(t.amount||0)-amount*(total-1)).toFixed(2));
+    const expected=index===total?lastAmount:amount;
+    return due===b.due && Math.abs(expected-Number(b.amount||0))<0.005;
+  });
+
+  return tx ? tx.id+"|"+index : "";
+}
+
+function billDeletionSignature(b){
+  if(!b)return "";
+  const source=findInstallmentSourceKey(b);
+  if(source){
+    return "installment-source|"+source;
+  }
+  return installmentBillSignature(b.desc,b.due,b.amount);
+}
+'''
+
+          if old not in s:
+              raise SystemExit('Expected installment signature block not found')
+          s=s.replace(old,new,1)
+
+          old_delete = '''    if(bill.fromInstallmentId && Number(bill.installmentNumber)>0){
+      if(!Array.isArray(db.deletedInstallmentBills))db.deletedInstallmentBills=[];
+      if(!Array.isArray(db.deletedBillSignatures))db.deletedBillSignatures=[];
+      const key=bill.fromInstallmentId+"|"+Number(bill.installmentNumber);
+      const sourceSig="installment-source|"+bill.fromInstallmentId+"|"+Number(bill.installmentNumber);
+      const valueSig=installmentBillSignature(bill.desc,bill.due,bill.amount);
+      if(!db.deletedInstallmentBills.includes(key))db.deletedInstallmentBills.push(key);
+      if(!db.deletedBillSignatures.includes(sourceSig))db.deletedBillSignatures.push(sourceSig);
+      if(!db.deletedBillSignatures.includes(valueSig))db.deletedBillSignatures.push(valueSig);
+    }else{
+      if(!Array.isArray(db.deletedBillSignatures))db.deletedBillSignatures=[];
+      const sig=billDeletionSignature(bill);
+      if(sig&&!db.deletedBillSignatures.includes(sig))db.deletedBillSignatures.push(sig);
+    }
+'''
+
+          new_delete = '''    if(!Array.isArray(db.deletedInstallmentBills))db.deletedInstallmentBills=[];
+    if(!Array.isArray(db.deletedBillSignatures))db.deletedBillSignatures=[];
+
+    const installmentSource=findInstallmentSourceKey(bill);
+    if(installmentSource){
+      const sourceSig="installment-source|"+installmentSource;
+      const valueSig=installmentBillSignature(bill.desc,bill.due,bill.amount);
+      if(!db.deletedInstallmentBills.includes(installmentSource))db.deletedInstallmentBills.push(installmentSource);
+      if(!db.deletedBillSignatures.includes(sourceSig))db.deletedBillSignatures.push(sourceSig);
+      if(!db.deletedBillSignatures.includes(valueSig))db.deletedBillSignatures.push(valueSig);
+    }else{
+      const sig=billDeletionSignature(bill);
+      if(sig&&!db.deletedBillSignatures.includes(sig))db.deletedBillSignatures.push(sig);
+    }
+'''
+
+          if old_delete not in s:
+              raise SystemExit('Expected delete block not found')
+          s=s.replace(old_delete,new_delete,1)
+
+          old_check = '''      if(
+        db.deletedInstallmentBills.includes(deletedKey) ||
+        db.deletedBillSignatures.includes("installment-source|"+tx.id+"|"+i) ||
+        db.deletedBillSignatures.includes(generatedSignature)
+      )continue;
+'''
+          new_check = '''      const sourceKey=tx.id+"|"+i;
+      if(
+        db.deletedInstallmentBills.includes(sourceKey) ||
+        db.deletedBillSignatures.includes("installment-source|"+sourceKey) ||
+        db.deletedBillSignatures.includes(generatedSignature)
+      )continue;
+'''
+          if old_check not in s:
+              raise SystemExit('Expected sync check not found')
+          s=s.replace(old_check,new_check,1)
+
+          p.write_text(s,encoding='utf-8')
+          print('Applied V4 repair')
+
+      - name: Commit repair
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add index.html
+          git diff --cached --quiet && exit 0
+          git commit -m 'Fix legacy installment bill deletion permanently'
+          git push
