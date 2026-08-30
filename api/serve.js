@@ -1,5 +1,5 @@
 export default async function handler(req, res) {
-  const sourceUrl = "https://raw.githubusercontent.com/carlosferrju-bot/carlos-finance/main/index.html?arma_guard=10";
+  const sourceUrl = "https://raw.githubusercontent.com/carlosferrju-bot/carlos-finance/main/index.html?arma_guard=11";
   const upstream = await fetch(sourceUrl, { cache: "no-store" });
 
   if (!upstream.ok) {
@@ -9,7 +9,7 @@ export default async function handler(req, res) {
 
   let html = await upstream.text();
 
-  const marker = "/* PERMANENT_LEGACY_ARMA_GUARD_V10 */";
+  const marker = "/* PERMANENT_LEGACY_ARMA_GUARD_V11 */";
   const guard = `
 ${marker}
 (function(){
@@ -20,6 +20,7 @@ ${marker}
       && String(b.due||"")==="2026-08-24"
       && Math.abs(Number(b.amount||0)-437.73)<0.005;
   }
+
   function purgeBlockedArmaBill(){
     if(!Array.isArray(db.bills)) db.bills=[];
     const before=db.bills.length;
@@ -27,11 +28,6 @@ ${marker}
     return db.bills.length!==before;
   }
 
-  /*
-   * A simples exclusão do registro não é suficiente porque o sincronizador
-   * de parcelas pode recriá-lo durante render(). Portanto o bloqueio é feito
-   * também no ponto em que as parcelas são sincronizadas.
-   */
   if(typeof syncInstallmentExpensesToBills==="function"){
     const originalSyncInstallments=syncInstallmentExpensesToBills;
     syncInstallmentExpensesToBills=function(){
@@ -63,13 +59,17 @@ ${marker}
     };
   }
 
-  /* Corrige imediatamente uma cópia antiga que já esteja no localStorage. */
-  if(purgeBlockedArmaBill()) originalSave();
-
   /*
-   * O service worker é apenas auxiliar de atualização. O bloqueio acima é
-   * independente dele e funciona mesmo sem service worker/cache.
+   * O erro da versão anterior era simples, mas importante: a linha era
+   * removida do banco depois que render() já havia desenhado a tabela.
+   * Agora, quando a purga altera os dados, renderizamos novamente a tela.
    */
+  const removed=purgeBlockedArmaBill();
+  if(removed){
+    originalSave();
+    if(typeof render==="function") render();
+  }
+
   if(!window.__carlosFinanceSWRegistered && "serviceWorker" in navigator){
     window.__carlosFinanceSWRegistered=true;
     navigator.serviceWorker.register("/sw.js",{scope:"/"}).catch(()=>{});
