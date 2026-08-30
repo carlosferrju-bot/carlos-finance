@@ -813,7 +813,8 @@ function printFinancialReport(){
       <tbody>${htmlRows||'<tr><td colspan="5">Nenhum registro.</td></tr>'}</tbody>
     </table>
     <div class="footer">Relatório gerado pelo CARLOS FINANCE.</div>
-  </body></html>`);
+  <script src="installment-edit-fix.js"></script>
+</body></html>`);
   win.document.close();
   win.focus();
   setTimeout(()=>win.print(),300);
