@@ -2379,8 +2379,126 @@ function editFixed(id){
   });
 }
 
-(async()=>{
-  await loadBackupHandle();
+/* INSTALLMENT_DELETE_REPAIR_V6 */
+(function(){
+  function v6Norm(v){
+    return String(v||"").normalize("NFKC").replace(/[–—−]/g,"-").replace(/ +/g," ").trim().toLocaleLowerCase("pt-BR");
+  }
+  function v6Signature(b){
+    if(!b)return "";
+    return "v6|"+v6Norm(b.desc)+"|"+String(b.due||"")+"|"+Number(b.amount||0).toFixed(2);
+  }
+  function v6SourceKey(b){
+    if(!b)return "";
+    if(b.fromInstallmentId && Number(b.installmentNumber)>0)return b.fromInstallmentId+"|"+Number(b.installmentNumber);
+    const text=String(b.desc||"");
+    const m=text.match(/(?:parcela|prestação)[ ]*([0-9]+)[ ]*[/][ ]*([0-9]+)/i);
+    if(!m)return "";
+    const idx=Number(m[1]), total=Number(m[2]);
+    if(idx<1||total<2)return "";
+    const base=v6Norm(text.replace(/[-—–−]?[ ]*(?:parcela|prestação)[ ]*[0-9]+[ ]*[/][ ]*[0-9]+.*$/i,""));
+    for(const tx of (db.transactions||[])){
+      if(!tx||tx.type!=="expense"||tx.payment==="credit"||Number(tx.installments)!==total)continue;
+      if(v6Norm(tx.desc)!==base)continue;
+      const d=new Date(String(tx.date||"")+"T12:00:00");
+      if(Number.isNaN(d.getTime()))continue;
+      d.setMonth(d.getMonth()+idx-1);
+      const due=d.toISOString().slice(0,10);
+      const part=Number((Number(tx.amount||0)/total).toFixed(2));
+      const last=Number((Number(tx.amount||0)-part*(total-1)).toFixed(2));
+      const expected=idx===total?last:part;
+      if(due===b.due && Math.abs(expected-Number(b.amount||0))<0.005)return tx.id+"|"+idx;
+    }
+    return "";
+  }
+  function v6Ensure(){
+    if(!Array.isArray(db.deletedInstallmentBills))db.deletedInstallmentBills=[];
+    if(!Array.isArray(db.deletedBillSignatures))db.deletedBillSignatures=[];
+  }
+  function v6Suppress(b){
+    v6Ensure();
+    const source=v6SourceKey(b);
+    if(source&&!db.deletedInstallmentBills.includes(source))db.deletedInstallmentBills.push(source);
+    const sourceSig=source?"installment-source|"+source:"";
+    if(sourceSig&&!db.deletedBillSignatures.includes(sourceSig))db.deletedBillSignatures.push(sourceSig);
+    const sig=v6Signature(b);
+    if(sig&&!db.deletedBillSignatures.includes(sig))db.deletedBillSignatures.push(sig);
+    if(typeof installmentBillSignature==="function"){
+      const oldSig=installmentBillSignature(b.desc,b.due,b.amount);
+      if(oldSig&&!db.deletedBillSignatures.includes(oldSig))db.deletedBillSignatures.push(oldSig);
+    }
+  }
+  function v6Suppressed(b){
+    v6Ensure();
+    const source=v6SourceKey(b);
+    if(source&&db.deletedInstallmentBills.includes(source))return true;
+    if(source&&db.deletedBillSignatures.includes("installment-source|"+source))return true;
+    const sig=v6Signature(b);
+    if(sig&&db.deletedBillSignatures.includes(sig))return true;
+    if(typeof installmentBillSignature==="function"){
+      const oldSig=installmentBillSignature(b.desc,b.due,b.amount);
+      if(oldSig&&db.deletedBillSignatures.includes(oldSig))return true;
+    }
+    return false;
+  }
+
+  /* Preserve the exact legacy row the user has already confirmed should be deleted. */
+  v6Ensure();
+  (db.bills||[]).forEach(b=>{
+    if(b.paid===true)return;
+    if(v6Norm(b.desc)==="arma - parcela 1/4" && b.due==="2026-08-24" && Math.abs(Number(b.amount||0)-437.73)<0.005)v6Suppress(b);
+  });
+
+  /* New runtime synchronizer: deleted installment identities are tombstones. */
+  syncInstallmentExpensesToBills=function(){
+    if(!Array.isArray(db.bills))db.bills=[];
+    if(!Array.isArray(db.transactions))db.transactions=[];
+    v6Ensure();
+    db.bills=db.bills.filter(b=>b.paid===true||!v6Suppressed(b));
+    const txs=db.transactions.filter(t=>t&&t.type==="expense"&&t.payment!=="credit"&&Number(t.installments)>1&&!t.isCardAdjustment);
+    txs.forEach(tx=>{
+      const n=Math.max(1,Number(tx.installments)||1);
+      const total=Number(tx.amount)||0;
+      const base=Number((total/n).toFixed(2));
+      for(let i=1;i<=n;i++){
+        const amount=i===n?Number((total-base*(n-1)).toFixed(2)):base;
+        const d=new Date(String(tx.date||"")+"T12:00:00");
+        if(Number.isNaN(d.getTime()))continue;
+        d.setMonth(d.getMonth()+i-1);
+        const due=d.toISOString().slice(0,10);
+        const source=tx.id+"|"+i;
+        const desc=`${tx.desc} — parcela ${i}/${n}`;
+        const probe={desc,due,amount,fromInstallmentId:tx.id,installmentNumber:i};
+        if(db.deletedInstallmentBills.includes(source)||db.deletedBillSignatures.includes("installment-source|"+source)||v6Suppressed(probe))continue;
+        if(db.bills.some(b=>b.fromInstallmentId===tx.id&&Number(b.installmentNumber)===i))continue;
+        db.bills.push({id:uid(),desc,category:tx.category,categoryName:catName(tx.category),amount,due,nature:tx.nature==="fixed"?"fixed":"variable",payment:tx.payment||"Conta / Pix",recurring:"no",recurringKey:"",fromInstallmentId:tx.id,installmentNumber:i,installmentTotal:n,note:tx.note||`Parcela ${i}/${n}`,paid:false,paidDate:"",createdAt:today});
+      }
+    });
+  };
+
+  /* New delete handler: resolve old rows to their source transaction before deleting. */
+  deleteBill=function(id){
+    const bill=(db.bills||[]).find(x=>x.id===id);
+    if(!bill)return;
+    if(!confirm("Excluir esta conta?"))return;
+    if(bill.cardMonthSummary===true&&bill.cardId&&bill.due){
+      if(!Array.isArray(db.deletedCardBills))db.deletedCardBills=[];
+      const key=bill.cardId+"|"+monthKey(bill.due);
+      if(!db.deletedCardBills.includes(key))db.deletedCardBills.push(key);
+    }
+    const text=String(bill.desc||"");
+    if(bill.fromInstallmentId||/(?:parcela|prestação)[ ]*[0-9]+[ ]*[/][ ]*[0-9]+/i.test(text))v6Suppress(bill);
+    db.bills=db.bills.filter(x=>x.id!==id);
+    persist("Conta excluída definitivamente.");
+  };
+
+  /* Remove the known legacy row immediately and save the tombstone. */
+  const before=(db.bills||[]).length;
+  db.bills=(db.bills||[]).filter(b=>b.paid===true||!v6Suppressed(b));
+  if(db.bills.length!==before)save();
+})();
+
+(async()=>{  await loadBackupHandle();
   updateBackupUI();
   // Garante uma primeira cópia automática após abrir o sistema.
   setTimeout(()=>performAutomaticBackup(),1200);
