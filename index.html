@@ -2498,6 +2498,38 @@ function editFixed(id){
   if(db.bills.length!==before)save();
 })();
 
+/* LEGACY_ARMA_PERMANENT_GUARD_V7 */
+(function(){
+  function v7Norm(v){
+    return String(v||'').normalize('NFKC').replace(/[–—−]/g,'-').replace(/\s+/g,' ').trim().toLocaleLowerCase('pt-BR');
+  }
+  function v7LegacyArma(b){
+    if(!b || b.paid===true) return false;
+    const desc=v7Norm(b.desc);
+    const due=String(b.due||'');
+    const amount=Number(b.amount||0);
+    return desc==='arma - parcela 1/4' && due==='2026-08-24' && Math.abs(amount-437.73)<0.005;
+  }
+  function v7PurgeLegacyArma(){
+    if(!Array.isArray(db.bills)) return false;
+    const before=db.bills.length;
+    db.bills=db.bills.filter(b=>!v7LegacyArma(b));
+    return db.bills.length!==before;
+  }
+  const v7OriginalSync=syncInstallmentExpensesToBills;
+  syncInstallmentExpensesToBills=function(){
+    v7PurgeLegacyArma();
+    v7OriginalSync();
+    v7PurgeLegacyArma();
+  };
+  const v7OriginalDeleteBill=deleteBill;
+  deleteBill=function(id){
+    v7OriginalDeleteBill(id);
+    v7PurgeLegacyArma();
+  };
+  if(v7PurgeLegacyArma()) save();
+})();
+
 (async()=>{  await loadBackupHandle();
   updateBackupUI();
   // Garante uma primeira cópia automática após abrir o sistema.
